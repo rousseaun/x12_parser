@@ -35,7 +35,10 @@ class X12Segment:
 
     def get_element(self, position: int) -> Optional[str]:
         """Get element value by position"""
-        return next((element.value for element in self.elements if element.position == position), None)
+        for element in self.elements:
+            if element.position == position:
+                return element.value
+        return None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -69,9 +72,47 @@ class X12TransactionSet:
         if se_count != actual_count:
             raise X12ParsingError(f'SE segment count ({se_count}) does not match actual segment count ({actual_count})')
 
-    def get_segment(self, segment_id: str) -> Optional[X12Segment]:
-        """Get first segment by ID"""
-        return next((segment for segment in self.segments if segment.segment_id == segment_id), None)
+    def _get_segment_by_position(self, segment_id: str, position: int) -> Optional[X12Segment]:
+        """Get segment matching both ID and position"""
+        for segment in self.segments:
+            if segment.segment_id == segment_id and segment.position == position:
+                return segment
+        return None
+
+    def _get_segment_by_occurrence(self, segment_id: str, occurrence: int) -> Optional[X12Segment]:
+        """Get the nth occurrence of a segment with given ID"""
+        if occurrence < 1:
+            return None
+
+        count = 0
+        for segment in self.segments:
+            if segment.segment_id == segment_id:
+                count += 1
+                if count == occurrence:
+                    return segment
+        return None
+
+    def _get_first_segment(self, segment_id: str) -> Optional[X12Segment]:
+        """Get first segment matching the ID"""
+        for segment in self.segments:
+            if segment.segment_id == segment_id:
+                return segment
+        return None
+
+    def get_segment(self, segment_id: str, position: Optional[int] = None, 
+                   occurrence: Optional[int] = None) -> Optional[X12Segment]:
+        """Get segment by ID with optional position or occurrence specification"""
+        if position is not None:
+            return self._get_segment_by_position(segment_id, position)
+            
+        if occurrence is not None:
+            return self._get_segment_by_occurrence(segment_id, occurrence)
+            
+        return self._get_first_segment(segment_id)
+    
+    def get_segments(self, segment_id: str) -> List[X12Segment]:
+        """Get all segments with ID"""
+        return [segment for segment in self.segments if segment.segment_id == segment_id]
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -189,7 +230,7 @@ class X12Parser:
         self.current_functional_group = None
         self.current_transaction_set = None
         self.interchanges = []
-        self.current_position = 0
+        self.transaction_set_position = 1
 
     def _detect_encoding(self, binary_file) -> Tuple[str, int]:
         """Detect file encoding based on BOM"""
@@ -239,13 +280,13 @@ class X12Parser:
             
         return element_separator, component_separator, segment_terminator
 
-    def _create_segment(self, segment_id: str, elements: List[str]) -> X12Segment:
+    def _create_segment(self, segment_id: str, elements: List[str], position: int) -> X12Segment:
         """Create a segment object from parsed elements"""
         return X12Segment(
             segment_id=segment_id,
             elements=[X12Element(value=value.strip() if value.strip() else '', position=i) 
                      for i, value in enumerate(elements[1:], start=1)],
-            position=self.current_position
+            position=position
         )
 
     def parse_file(self, file_path: str) -> List[X12Interchange]:
@@ -298,8 +339,7 @@ class X12Parser:
             
             try:
                 self._process_segment(segment_id, elements, element_separator, 
-                                   component_separator, segment_terminator)
-                self.current_position += 1
+                                      component_separator, segment_terminator)
             except Exception as e:
                 raise X12ParsingError(f'Error processing segment "{segment_str}": {str(e)}')
 
@@ -349,7 +389,7 @@ class X12Parser:
         formatted_sender = self._format_entity_id(elements[5].strip(), elements[6].strip())
         formatted_receiver = self._format_entity_id(elements[7].strip(), elements[8].strip())
             
-        isa_segment = self._create_segment('ISA', elements)
+        isa_segment = self._create_segment('ISA', elements, 1)
             
         self.current_interchange = X12Interchange(
             control_number=elements[13],
@@ -373,7 +413,7 @@ class X12Parser:
         if not self.current_interchange:
             raise X12ParsingError('IEA segment found without matching ISA')
             
-        iea_segment = self._create_segment('IEA', elements)
+        iea_segment = self._create_segment('IEA', elements, 2)
         self.current_interchange.iea_segment = iea_segment
             
         if elements[2] != self.current_interchange.control_number:
@@ -391,7 +431,7 @@ class X12Parser:
         if not self.current_interchange:
             raise X12ParsingError('GS segment found outside of interchange')
             
-        gs_segment = self._create_segment('GS', elements)
+        gs_segment = self._create_segment('GS', elements, 1)
             
         self.current_functional_group = X12FunctionalGroup(
             control_number=elements[6],
@@ -413,7 +453,7 @@ class X12Parser:
         if not self.current_functional_group:
             raise X12ParsingError('GE segment found without matching GS')
             
-        ge_segment = self._create_segment('GE', elements)
+        ge_segment = self._create_segment('GE', elements, 2)
         self.current_functional_group.ge_segment = ge_segment
             
         self._validate_ge_segment(elements)
@@ -438,7 +478,7 @@ class X12Parser:
         if not self.current_functional_group:
             raise X12ParsingError('ST segment found outside of functional group')
             
-        st_segment = self._create_segment('ST', elements)
+        st_segment = self._create_segment('ST', elements, 1)
         
         self.current_transaction_set = X12TransactionSet(
             control_number=elements[2],
@@ -455,10 +495,10 @@ class X12Parser:
         if not self.current_transaction_set:
             raise X12ParsingError('SE segment found without matching ST')
         
-        se_segment = self._create_segment('SE', elements)
-        self.current_transaction_set.segments.append(se_segment)
         self.current_transaction_set.segment_count += 1
-            
+        se_segment = self._create_segment('SE', elements, self.current_transaction_set.segment_count)
+        self.current_transaction_set.segments.append(se_segment)
+        
         if elements[2] != self.current_transaction_set.control_number:
             raise X12ParsingError('SE control number does not match ST')
             
@@ -473,7 +513,7 @@ class X12Parser:
         """Process a data segment within a transaction set"""
         if not self.current_transaction_set:
             raise X12ParsingError(f'Data segment {segment_id} found outside of transaction set')
-            
-        segment = self._create_segment(segment_id, elements)
-        self.current_transaction_set.segments.append(segment)
+        
         self.current_transaction_set.segment_count += 1
+        segment = self._create_segment(segment_id, elements, self.current_transaction_set.segment_count)
+        self.current_transaction_set.segments.append(segment)
