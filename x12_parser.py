@@ -224,13 +224,11 @@ class X12Parser:
 
     def reset(self) -> None:
         """Reset parser state for new file processing"""
-        self.raw_buffer = bytearray()
         self.text_buffer = ''
         self.current_interchange = None
         self.current_functional_group = None
         self.current_transaction_set = None
         self.interchanges = []
-        self.transaction_set_position = 1
 
     def _detect_encoding(self, binary_file) -> Tuple[str, int]:
         """Detect file encoding based on BOM"""
@@ -255,15 +253,11 @@ class X12Parser:
             return 'utf-32', 4
         
         return self.encoding, 0
-    
-    def _read_chunk(self, text_stream: io.TextIOBase) -> str:
-        """Read a chunk of data using StreamReader"""
-        return text_stream.read(self.chunk_size)
 
     def _read_isa_segment(self, text_stream: io.TextIOBase) -> Tuple[str, str, str]:
         """Read and validate ISA segment, return separators"""
         while len(self.text_buffer) < self.ISA_SEGMENT_LENGTH:
-            next_chunk = self._read_chunk(text_stream)
+            next_chunk = text_stream.read(self.chunk_size)
             if not next_chunk:
                 raise X12ParsingError('Incomplete ISA segment at start of file')
             self.text_buffer += next_chunk
@@ -304,7 +298,7 @@ class X12Parser:
                 self._process_chunk(element_separator, component_separator, segment_terminator)
                 
                 if not self.text_buffer or self.text_buffer[-1] != segment_terminator:
-                    chunk = self._read_chunk(text_stream)
+                    chunk = text_stream.read(self.chunk_size)
                     if not chunk:
                         if self.text_buffer.strip():
                             raise X12ParsingError(f'Incomplete segment at end of file: {self.text_buffer.strip()}')
@@ -327,31 +321,23 @@ class X12Parser:
     def _process_chunk(self, element_separator: str, component_separator: str, segment_terminator: str) -> None:
         """Process a chunk of X12 data"""
         while self.text_buffer:
-            segment_str = self._extract_next_segment(segment_terminator)
-            if segment_str is None:  # No complete segment found
+            terminator_pos = self.text_buffer.find(segment_terminator)
+            if terminator_pos == -1:
                 break
+                
+            segment_str = self.text_buffer[:terminator_pos].strip()
+            self.text_buffer = self.text_buffer[terminator_pos + len(segment_terminator):]
                 
             if not segment_str:  # Empty segment
                 continue
             
             elements = segment_str.split(element_separator)
             segment_id = elements[0]
-            
             try:
                 self._process_segment(segment_id, elements, element_separator, 
                                       component_separator, segment_terminator)
             except Exception as e:
                 raise X12ParsingError(f'Error processing segment "{segment_str}": {str(e)}')
-
-    def _extract_next_segment(self, segment_terminator: str) -> Optional[str]:
-        """Extract next complete segment from buffer"""
-        terminator_pos = self.text_buffer.find(segment_terminator)
-        if terminator_pos == -1:
-            return None
-            
-        segment_str = self.text_buffer[:terminator_pos].strip()
-        self.text_buffer = self.text_buffer[terminator_pos + len(segment_terminator):]
-        return segment_str
 
     def _process_segment(self, segment_id: str, elements: List[str], element_separator: str,
                          component_separator: str, segment_terminator: str) -> None:
